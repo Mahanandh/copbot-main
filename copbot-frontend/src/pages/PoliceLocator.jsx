@@ -74,9 +74,12 @@ const DEFAULT_CENTER = [13.0827, 80.2707];
 export default function PoliceLocator() {
     const [searchQuery, setSearchQuery] = useState('');
     const [userLocation, setUserLocation] = useState(null);
+    const [mapCenter, setMapCenter] = useState(null); // Decoupled map center for search
     const [stations, setStations] = useState([]);
     const [mapLoading, setMapLoading] = useState(true);
+    const [searching, setSearching] = useState(false); // Geocoding in progress
     const [locationError, setLocationError] = useState('');
+    const [searchedArea, setSearchedArea] = useState(''); // Display name for searched location
     const [selectedStation, setSelectedStation] = useState(null);
     const [flyTarget, setFlyTarget] = useState(null);
 
@@ -87,6 +90,7 @@ export default function PoliceLocator() {
                 (position) => {
                     const loc = [position.coords.latitude, position.coords.longitude];
                     setUserLocation(loc);
+                    setMapCenter(loc);
                     setMapLoading(false);
                     fetchNearbyStations(loc[0], loc[1]);
                 },
@@ -94,6 +98,7 @@ export default function PoliceLocator() {
                     console.warn('Geolocation failed:', error.message);
                     setLocationError('Location access denied. Showing default area.');
                     setUserLocation(DEFAULT_CENTER);
+                    setMapCenter(DEFAULT_CENTER);
                     setMapLoading(false);
                     fetchNearbyStations(DEFAULT_CENTER[0], DEFAULT_CENTER[1]);
                 },
@@ -102,6 +107,7 @@ export default function PoliceLocator() {
         } else {
             setLocationError('Geolocation not supported.');
             setUserLocation(DEFAULT_CENTER);
+            setMapCenter(DEFAULT_CENTER);
             setMapLoading(false);
             fetchNearbyStations(DEFAULT_CENTER[0], DEFAULT_CENTER[1]);
         }
@@ -148,11 +154,46 @@ export default function PoliceLocator() {
         }
     };
 
-    // Filter stations by search query
-    const filteredStations = stations.filter(s =>
-        s.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        s.address?.toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    // Geocode search query using Nominatim (free, no API key)
+    const handleSearch = async () => {
+        const query = searchQuery.trim();
+        if (!query) return;
+
+        setSearching(true);
+        setLocationError('');
+        try {
+            const res = await fetch(
+                `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1`,
+                { headers: { 'Accept-Language': 'en' } }
+            );
+            const results = await res.json();
+
+            if (results.length > 0) {
+                const { lat, lon, display_name } = results[0];
+                const newCenter = [parseFloat(lat), parseFloat(lon)];
+                setMapCenter(newCenter);
+                setSearchedArea(display_name.split(',').slice(0, 2).join(','));
+                setFlyTarget(newCenter);
+                setStations([]); // Clear old results
+                fetchNearbyStations(newCenter[0], newCenter[1]);
+            } else {
+                setLocationError(`No location found for "${query}".`);
+            }
+        } catch (err) {
+            console.error('Geocoding failed:', err);
+            setLocationError('Search failed. Please try again.');
+        } finally {
+            setSearching(false);
+        }
+    };
+
+    // Handle Enter key press on search input
+    const handleSearchKeyDown = (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleSearch();
+        }
+    };
 
     // Loading skeleton for the left pane
     const ListSkeleton = () => (
@@ -194,9 +235,18 @@ export default function PoliceLocator() {
                             type="text"
                             value={searchQuery}
                             onChange={(e) => setSearchQuery(e.target.value)}
-                            placeholder="Search by PIN code or Area..."
-                            className="w-full bg-transparent py-4 pl-12 pr-4 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all font-medium rounded-2xl"
+                            onKeyDown={handleSearchKeyDown}
+                            placeholder="Search by PIN code or Area... (press Enter)"
+                            className="w-full bg-transparent py-4 pl-12 pr-12 text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-500/20 focus:border-teal-500 transition-all font-medium rounded-2xl"
                         />
+                        {/* Search submit button */}
+                        <button
+                            onClick={handleSearch}
+                            disabled={searching}
+                            className="absolute inset-y-0 right-3 flex items-center text-teal-600 hover:text-teal-800 transition-colors disabled:opacity-50"
+                        >
+                            {searching ? <Loader2 className="w-5 h-5 animate-spin" /> : <Search className="w-5 h-5" />}
+                        </button>
                     </div>
 
                     {/* Active Location Info */}
@@ -217,9 +267,11 @@ export default function PoliceLocator() {
                                 </>
                             ) : (
                                 <>
-                                    <p className="text-sm font-bold text-teal-900">Location Detected</p>
+                                    <p className="text-sm font-bold text-teal-900">
+                                        {searchedArea ? `Showing: ${searchedArea}` : 'Location Detected'}
+                                    </p>
                                     <p className="text-xs font-medium text-teal-700">
-                                        {userLocation?.[0].toFixed(4)}°N, {userLocation?.[1].toFixed(4)}°E • {stations.length} stations found
+                                        {(mapCenter || userLocation)?.[0].toFixed(4)}°N, {(mapCenter || userLocation)?.[1].toFixed(4)}°E • {stations.length} station{stations.length !== 1 ? 's' : ''} found
                                     </p>
                                 </>
                             )}
@@ -228,18 +280,19 @@ export default function PoliceLocator() {
 
                     {/* Station List */}
                     <div className="flex-1 overflow-y-auto space-y-3 pr-2 scrollbar-hide pb-4">
-                        {mapLoading ? (
+                        {(mapLoading || searching) ? (
                             <ListSkeleton />
-                        ) : filteredStations.length === 0 ? (
+                        ) : stations.length === 0 ? (
                             <div className="bg-white border border-slate-200 rounded-2xl p-6 text-center">
                                 <AlertCircle className="w-10 h-10 text-slate-300 mx-auto mb-3" />
                                 <p className="text-slate-600 font-bold">No stations found</p>
-                                <p className="text-slate-400 text-sm font-medium mt-1">Try expanding your search area</p>
+                                <p className="text-slate-400 text-sm font-medium mt-1">Try searching a different area or PIN code</p>
                             </div>
                         ) : (
-                            filteredStations.map((station) => {
-                                const distance = userLocation
-                                    ? getDistance(userLocation[0], userLocation[1], station.lat, station.lng).toFixed(1)
+                            stations.map((station) => {
+                                const center = mapCenter || userLocation;
+                                const distance = center
+                                    ? getDistance(center[0], center[1], station.lat, station.lng).toFixed(1)
                                     : '—';
                                 const directionsUrl = `https://www.google.com/maps/dir/?api=1&destination=${station.lat},${station.lng}`;
 
